@@ -235,7 +235,9 @@ async def state(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # Main
-TOKEN = "YOUR_BOT_TOKEN_HERE"  # Replace with your actual bot token
+import os
+TOKEN = os.environ["BOT_TOKEN"]
+  # Replace with your actual bot token
 app = ApplicationBuilder().token(TOKEN).build()
 
 app.add_handler(CommandHandler("start", start))
