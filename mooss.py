@@ -1,3 +1,4 @@
+import os
 import random
 import sqlite3
 from datetime import datetime, timedelta
@@ -6,7 +7,9 @@ from telegram.ext import (
     ApplicationBuilder, CommandHandler, ContextTypes
 )
 
-# Initialize DB
+# ====================
+# DATABASE SETUP
+# ====================
 conn = sqlite3.connect("bigbigger.db", check_same_thread=False)
 cursor = conn.cursor()
 
@@ -30,10 +33,11 @@ CREATE TABLE IF NOT EXISTS loans (
     amount INTEGER
 )
 ''')
-
 conn.commit()
 
-# Utility Functions
+# ====================
+# UTILITY FUNCTIONS
+# ====================
 def get_player(user_id, username):
     cursor.execute("SELECT * FROM players WHERE user_id = ?", (user_id,))
     data = cursor.fetchone()
@@ -59,7 +63,9 @@ def can_use(user_id, field, hours):
         return True
     return datetime.now() - datetime.fromisoformat(last_time) >= timedelta(hours=hours)
 
-# Commands
+# ====================
+# COMMANDS
+# ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     get_player(user.id, user.username)
@@ -79,7 +85,6 @@ async def play(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     new_kir = cursor.execute("SELECT kir FROM players WHERE user_id = ?", (user.id,)).fetchone()[0]
 
-    # Update longest/shortest Kir
     cursor.execute("UPDATE players SET longest_kir = MAX(longest_kir, ?), shortest_kir = MIN(shortest_kir, ?) WHERE user_id = ?",
                    (new_kir, new_kir, user.id))
     conn.commit()
@@ -234,19 +239,31 @@ async def state(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Shortest Kir: {shortest_kir}"
     )
 
-# Main
-import os
-TOKEN = os.environ["BOT_TOKEN"]
-  # Replace with your actual bot token
-app = ApplicationBuilder().token(TOKEN).build()
+# ====================
+# MAIN — USING WEBHOOKS
+# ====================
+if __name__ == "__main__":
+    from telegram.ext import ApplicationBuilder
 
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("play", play))
-app.add_handler(CommandHandler("top", top))
-app.add_handler(CommandHandler("fight", fight))
-app.add_handler(CommandHandler("randomboost", randomboost))
-app.add_handler(CommandHandler("loan", loan))
-app.add_handler(CommandHandler("state", state))
+    TOKEN = os.environ["BOT_TOKEN"]
+    app = ApplicationBuilder().token(TOKEN).build()
 
-print("Bot is running...")
-app.run_polling()
+    # Command Handlers
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("play", play))
+    app.add_handler(CommandHandler("top", top))
+    app.add_handler(CommandHandler("fight", fight))
+    app.add_handler(CommandHandler("randomboost", randomboost))
+    app.add_handler(CommandHandler("loan", loan))
+    app.add_handler(CommandHandler("state", state))
+
+    print("Bot is running with webhook...")
+
+    # Webhook Setup for Render
+    PORT = int(os.environ.get('PORT', '10000'))
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=TOKEN,
+        webhook_url=f"https://moosdick.onrender.com/{TOKEN}"
+    )
