@@ -1,236 +1,209 @@
-from telegram import Update, BotCommand
-from telegram.ext import (
-    ApplicationBuilder, CommandHandler, ContextTypes
-)
 import os
 import random
 import sqlite3
 from datetime import datetime, timedelta
 
-# ====================
-# DATABASE SETUP
-# ====================
+from telegram import Update, BotCommand
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, ContextTypes
+)
+
+# --- DATABASE SETUP ---
+
 conn = sqlite3.connect("bigbigger.db", check_same_thread=False)
 cursor = conn.cursor()
 
+# Players table with group_id to separate states per group
 cursor.execute('''
 CREATE TABLE IF NOT EXISTS players (
-    user_id INTEGER PRIMARY KEY,
+    user_id INTEGER,
+    group_id INTEGER,
     username TEXT,
     kir INTEGER DEFAULT 0,
     last_use TEXT,
-    last_random TEXT,
+    last_emergency TEXT,
     win_streak INTEGER DEFAULT 0,
     longest_kir INTEGER DEFAULT 0,
-    shortest_kir INTEGER DEFAULT 0
+    shortest_kir INTEGER DEFAULT 0,
+    PRIMARY KEY(user_id, group_id)
 )
 ''')
 
+# Loans table also includes group_id for group-specific loans
 cursor.execute('''
 CREATE TABLE IF NOT EXISTS loans (
     lender_id INTEGER,
     borrower_id INTEGER,
+    group_id INTEGER,
     amount INTEGER
 )
 ''')
 conn.commit()
 
-# ====================
-# UTILITY FUNCTIONS
-# ====================
-def get_player(user_id, username):
-    cursor.execute("SELECT * FROM players WHERE user_id = ?", (user_id,))
-    data = cursor.fetchone()
-    if not data:
-        cursor.execute("INSERT INTO players (user_id, username, kir, longest_kir, shortest_kir) VALUES (?, ?, ?, ?, ?)",
-                       (user_id, username, 0, 0, 0))
+# --- HELPER FUNCTIONS ---
+
+def get_player(user_id, username, group_id):
+    cursor.execute("SELECT * FROM players WHERE user_id = ? AND group_id = ?", (user_id, group_id))
+    player = cursor.fetchone()
+    if not player:
+        cursor.execute(
+            "INSERT INTO players (user_id, group_id, username) VALUES (?, ?, ?)",
+            (user_id, group_id, username or "Unknown")
+        )
         conn.commit()
-    return cursor.execute("SELECT * FROM players WHERE user_id = ?", (user_id,)).fetchone()
+        cursor.execute("SELECT * FROM players WHERE user_id = ? AND group_id = ?", (user_id, group_id))
+        player = cursor.fetchone()
+    return player
 
-def update_kir(user_id, amount):
-    cursor.execute("UPDATE players SET kir = kir + ? WHERE user_id = ?", (amount, user_id))
+def update_kir(user_id, group_id, amount):
+    cursor.execute("UPDATE players SET kir = kir + ? WHERE user_id = ? AND group_id = ?", (amount, user_id, group_id))
     conn.commit()
 
-def set_time(user_id, field):
+def set_time(user_id, group_id, field):
     now = datetime.now().isoformat()
-    cursor.execute(f"UPDATE players SET {field} = ? WHERE user_id = ?", (now, user_id))
+    cursor.execute(f"UPDATE players SET {field} = ? WHERE user_id = ? AND group_id = ?", (now, user_id, group_id))
     conn.commit()
 
-def can_use(user_id, field, hours):
-    cursor.execute(f"SELECT {field} FROM players WHERE user_id = ?", (user_id,))
-    last_time = cursor.fetchone()[0]
-    if not last_time:
+def can_use(user_id, group_id, field, hours):
+    cursor.execute(f"SELECT {field} FROM players WHERE user_id = ? AND group_id = ?", (user_id, group_id))
+    last = cursor.fetchone()[0]
+    if not last:
         return True
-    return datetime.now() - datetime.fromisoformat(last_time) >= timedelta(hours=hours)
+    return datetime.now() - datetime.fromisoformat(last) >= timedelta(hours=hours)
 
-# ====================
-# COMMANDS
-# ====================
+# --- NOTIFICATION JOBS ---
+
+async def notify_play_available(context: ContextTypes.DEFAULT_TYPE):
+    data = context.job.data
+    try:
+        await context.bot.send_message(
+            chat_id=data['user_id'],
+            text=f"Hi {data.get('username','player')}! You can now use /play again in group {data['group_id']}!"
+        )
+    except Exception:
+        pass
+
+async def notify_emergency_available(context: ContextTypes.DEFAULT_TYPE):
+    data = context.job.data
+    try:
+        await context.bot.send_message(
+            chat_id=data['user_id'],
+            text=f"Hi {data.get('username','player')}! You can now use /emergencykir again in group {data['group_id']}!"
+        )
+    except Exception:
+        pass
+
+# --- COMMAND HANDLERS ---
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    get_player(user.id, user.username)
-    await update.message.reply_text(f"Welcome {user.username} to Big Bigger! Use /play to grow your Kir!")
+    group_id = update.effective_chat.id
+    get_player(user.id, user.username, group_id)
+    await update.message.reply_text(f"Welcome {user.username}! Use /play to start growing your Kir!")
 
 async def play(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    player = get_player(user.id, user.username)
+    group_id = update.effective_chat.id
+    player = get_player(user.id, user.username, group_id)
 
-    if not can_use(user.id, "last_use", 12):
+    if not can_use(user.id, group_id, "last_use", 12):
         await update.message.reply_text("You must wait 12 hours before playing again.")
         return
 
     change = random.randint(-5, 15)
-    update_kir(user.id, change)
-    set_time(user.id, "last_use")
+    update_kir(user.id, group_id, change)
+    set_time(user.id, group_id, "last_use")
 
-    new_kir = cursor.execute("SELECT kir FROM players WHERE user_id = ?", (user.id,)).fetchone()[0]
-
-    cursor.execute("UPDATE players SET longest_kir = MAX(longest_kir, ?), shortest_kir = MIN(shortest_kir, ?) WHERE user_id = ?",
-                   (new_kir, new_kir, user.id))
-    conn.commit()
-
-    await update.message.reply_text(f"{user.username}, your Kir changed by {change}. Now: {new_kir}")
-
-async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    leaderboard = cursor.execute("SELECT username, kir FROM players ORDER BY kir DESC LIMIT 10").fetchall()
-    message = "\U0001F3C6 Top Players:\n"
-    for i, (name, kir) in enumerate(leaderboard, 1):
-        message += f"{i}. {name} - {kir} Kir\n"
-    await update.message.reply_text(message)
-
-async def fight(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    attacker = get_player(user.id, user.username)
-
-    if len(context.args) < 1:
-        await update.message.reply_text("Usage: /fight <user_id>")
-        return
-
-    try:
-        defender_id = int(context.args[0])
-    except:
-        await update.message.reply_text("Invalid user ID.")
-        return
-
-    if user.id == defender_id:
-        await update.message.reply_text("You can't fight yourself.")
-        return
-
-    defender = get_player(defender_id, "Unknown")
-
-    attacker_kir = attacker[2]
-    defender_kir = defender[2]
-
-    if attacker_kir < 1 or defender_kir < 1:
-        await update.message.reply_text("Both players need at least 1 Kir to fight.")
-        return
-
-    total = attacker_kir + defender_kir
-    attacker_chance = attacker_kir / total
-
-    if random.random() < attacker_chance:
-        winner_id = user.id
-        loser_id = defender_id
-    else:
-        winner_id = defender_id
-        loser_id = user.id
-
-    fight_points = random.randint(1, min(attacker_kir, defender_kir, 10))
-
-    update_kir(winner_id, fight_points)
-    update_kir(loser_id, -fight_points)
-
-    for pid in [attacker[0], defender[0]]:
-        if pid == winner_id:
-            cursor.execute("UPDATE players SET win_streak = win_streak + 1 WHERE user_id = ?", (pid,))
-        else:
-            cursor.execute("UPDATE players SET win_streak = 0 WHERE user_id = ?", (pid,))
-    conn.commit()
-
-    for pid in [attacker[0], defender[0]]:
-        current_kir = cursor.execute("SELECT kir FROM players WHERE user_id = ?", (pid,)).fetchone()[0]
-        cursor.execute("UPDATE players SET longest_kir = MAX(longest_kir, ?), shortest_kir = MIN(shortest_kir, ?) WHERE user_id = ?",
-                       (current_kir, current_kir, pid))
-    conn.commit()
-
-    winner_kir = cursor.execute("SELECT kir FROM players WHERE user_id = ?", (winner_id,)).fetchone()[0]
-    ranks = cursor.execute("SELECT user_id FROM players ORDER BY kir DESC").fetchall()
-    rank_map = {uid: i+1 for i, (uid,) in enumerate(ranks)}
-
-    await update.message.reply_text(
-        f"\u2694\ufe0f Fight Result:\nWinner: {winner_id} (+{fight_points})\nLoser: {loser_id} (-{fight_points})\n"
-        f"{winner_id} Rank: {rank_map[winner_id]}, Kir: {winner_kir}"
+    # Schedule notification for /play cooldown end
+    context.job_queue.run_once(
+        notify_play_available, 12 * 3600,
+        data={'user_id': user.id, 'group_id': group_id, 'username': user.username}
     )
+
+    new_kir = cursor.execute("SELECT kir FROM players WHERE user_id = ? AND group_id = ?", (user.id, group_id)).fetchone()[0]
+
+    # Update longest and shortest Kir
+    cursor.execute("SELECT longest_kir, shortest_kir FROM players WHERE user_id = ? AND group_id = ?", (user.id, group_id))
+    longest, shortest = cursor.fetchone()
+    if new_kir > longest:
+        cursor.execute("UPDATE players SET longest_kir = ? WHERE user_id = ? AND group_id = ?", (new_kir, user.id, group_id))
+    if shortest == 0 or new_kir < shortest:
+        cursor.execute("UPDATE players SET shortest_kir = ? WHERE user_id = ? AND group_id = ?", (new_kir, user.id, group_id))
+    conn.commit()
+
+    await update.message.reply_text(f"{user.username}, your Kir changed by {change}. Now you have {new_kir} Kir.")
 
 async def emergencykir(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    player = get_player(user.id, user.username)
+    group_id = update.effective_chat.id
+    player = get_player(user.id, user.username, group_id)
+    kir = player[3]
 
-    if player[2] > 0:
+    if kir > 0:
         await update.message.reply_text("You can only use /emergencykir when your Kir is 0 or less.")
         return
 
-    if not can_use(user.id, "last_random", 24):
+    if not can_use(user.id, group_id, "last_emergency", 24):
         await update.message.reply_text("You must wait 24 hours before using /emergencykir again.")
         return
 
     boost = random.randint(3, 9)
-    update_kir(user.id, boost)
-    set_time(user.id, "last_random")
+    update_kir(user.id, group_id, boost)
+    set_time(user.id, group_id, "last_emergency")
 
-    await update.message.reply_text(f"\U0001F198 Emergency Kir activated! You received {boost} Kir.")
+    # Schedule notification for /emergencykir cooldown end
+    context.job_queue.run_once(
+        notify_emergency_available, 24 * 3600,
+        data={'user_id': user.id, 'group_id': group_id, 'username': user.username}
+    )
 
-async def loan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    get_player(user.id, user.username)
-
-    if len(context.args) < 2:
-        await update.message.reply_text("Usage: /loan <target_user_id> <amount>")
-        return
-
-    try:
-        target_id = int(context.args[0])
-        amount = int(context.args[1])
-    except:
-        await update.message.reply_text("Invalid input.")
-        return
-
-    if user.id == target_id:
-        await update.message.reply_text("You can't loan to yourself.")
-        return
-
-    target = get_player(target_id, "Unknown")
-    update_kir(user.id, -amount)
-    update_kir(target_id, amount)
-
-    cursor.execute("INSERT INTO loans (lender_id, borrower_id, amount) VALUES (?, ?, ?)",
-                   (user.id, target_id, amount))
+    # After boost, update longest and shortest Kir too
+    new_kir = cursor.execute("SELECT kir FROM players WHERE user_id = ? AND group_id = ?", (user.id, group_id)).fetchone()[0]
+    cursor.execute("SELECT longest_kir, shortest_kir FROM players WHERE user_id = ? AND group_id = ?", (user.id, group_id))
+    longest, shortest = cursor.fetchone()
+    if new_kir > longest:
+        cursor.execute("UPDATE players SET longest_kir = ? WHERE user_id = ? AND group_id = ?", (new_kir, user.id, group_id))
+    if shortest == 0 or new_kir < shortest:
+        cursor.execute("UPDATE players SET shortest_kir = ? WHERE user_id = ? AND group_id = ?", (new_kir, user.id, group_id))
     conn.commit()
 
-    await update.message.reply_text(f"{user.username} loaned {amount} Kir to user {target_id}.")
+    await update.message.reply_text(f"🚨 Emergency Kir activated! You received {boost} Kir. You now have {new_kir} Kir.")
+
+async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    group_id = update.effective_chat.id
+    leaderboard = cursor.execute(
+        "SELECT username, kir FROM players WHERE group_id = ? ORDER BY kir DESC LIMIT 10",
+        (group_id,)
+    ).fetchall()
+    message = "🏆 Top Players in this group:\n"
+    for i, (name, kir) in enumerate(leaderboard, 1):
+        message += f"{i}. {name} - {kir} Kir\n"
+    await update.message.reply_text(message)
 
 async def state(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    player = get_player(user.id, user.username)
-    kir = player[2]
-    win_streak = player[5]
-    longest_kir = player[6]
-    shortest_kir = player[7]
+    group_id = update.effective_chat.id
+    player = get_player(user.id, user.username, group_id)
+    kir = player[3]
+    win_streak = player[6]
+    longest_kir = player[7]
+    shortest_kir = player[8]
 
+    # Update longest and shortest Kir if needed
     if longest_kir == 0 or kir > longest_kir:
-        cursor.execute("UPDATE players SET longest_kir = ? WHERE user_id = ?", (kir, user.id))
+        cursor.execute("UPDATE players SET longest_kir = ? WHERE user_id = ? AND group_id = ?", (kir, user.id, group_id))
         longest_kir = kir
     if shortest_kir == 0 or kir < shortest_kir:
-        cursor.execute("UPDATE players SET shortest_kir = ? WHERE user_id = ?", (kir, user.id))
+        cursor.execute("UPDATE players SET shortest_kir = ? WHERE user_id = ? AND group_id = ?", (kir, user.id, group_id))
         shortest_kir = kir
     conn.commit()
 
-    all_ranks = cursor.execute("SELECT user_id FROM players ORDER BY kir DESC").fetchall()
-    rank_map = {uid: i+1 for i, (uid,) in enumerate(all_ranks)}
-    rank = rank_map[user.id]
+    all_players = cursor.execute("SELECT user_id FROM players WHERE group_id = ? ORDER BY kir DESC", (group_id,)).fetchall()
+    rank_map = {uid: i+1 for i, (uid,) in enumerate(all_players)}
+    rank = rank_map.get(user.id, "N/A")
 
     await update.message.reply_text(
-        f"\U0001F4CA {user.username}'s State:\n"
+        f"📊 {user.username}'s state in this group:\n"
         f"Kir: {kir}\n"
         f"Rank: #{rank}\n"
         f"Win Streak: {win_streak}\n"
@@ -238,47 +211,31 @@ async def state(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Shortest Kir: {shortest_kir}"
     )
 
-# ====================
-# BOT COMMANDS SETUP
-# ====================
+# --- BOT COMMANDS SETUP ---
+
 async def set_commands(application):
     commands = [
         BotCommand("start", "Start the bot"),
         BotCommand("play", "Play to grow or shrink your Kir"),
         BotCommand("top", "Show top players"),
-        BotCommand("fight", "Fight another user by user ID"),
-        BotCommand("emergencykir", "Use only if you have no Kir (once every 24h)"),
-        BotCommand("loan", "Loan Kir to another user"),
+        BotCommand("emergencykir", "Use emergency Kir if your Kir ≤ 0"),
         BotCommand("state", "Show your Kir state and rank"),
     ]
     await application.bot.set_my_commands(commands)
 
-# ====================
-# MAIN
-# ====================
+# --- MAIN ---
+
 if __name__ == "__main__":
     TOKEN = os.environ["BOT_TOKEN"]
     app = ApplicationBuilder().token(TOKEN).build()
 
-    # Command Handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("play", play))
     app.add_handler(CommandHandler("top", top))
-    app.add_handler(CommandHandler("fight", fight))
     app.add_handler(CommandHandler("emergencykir", emergencykir))
-    app.add_handler(CommandHandler("loan", loan))
     app.add_handler(CommandHandler("state", state))
 
-    # Register bot commands for "/" menu
     app.post_init = set_commands
 
-    print("Bot is running with webhook...")
-
-    # Webhook Setup for Render
-    PORT = int(os.environ.get('PORT', '10000'))
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        url_path=TOKEN,
-        webhook_url=f"https://moosdick.onrender.com/{TOKEN}"
-    )
+    print("Bot started...")
+    app.run_polling()
