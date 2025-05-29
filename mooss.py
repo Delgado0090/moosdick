@@ -1,11 +1,11 @@
-import os
-import random
-import sqlite3
-from datetime import datetime, timedelta
 from telegram import Update, BotCommand
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, ContextTypes
 )
+import os
+import random
+import sqlite3
+from datetime import datetime, timedelta
 
 # ====================
 # DATABASE SETUP
@@ -240,7 +240,7 @@ async def state(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # ====================
-# SET BOT COMMANDS (slash commands menu)
+# BOT COMMANDS SETUP
 # ====================
 async def set_commands(application):
     commands = [
@@ -255,13 +255,13 @@ async def set_commands(application):
     await application.bot.set_my_commands(commands)
 
 # ====================
-# MAIN - POLLING (for group use)
+# MAIN
 # ====================
 if __name__ == "__main__":
     TOKEN = os.environ["BOT_TOKEN"]
     app = ApplicationBuilder().token(TOKEN).build()
 
-    # Register handlers
+    # Command Handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("play", play))
     app.add_handler(CommandHandler("top", top))
@@ -270,8 +270,16 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("loan", loan))
     app.add_handler(CommandHandler("state", state))
 
-    # Set commands for slash menu
+    # Register bot commands for "/" menu
     app.post_init = set_commands
 
-    print("Bot is running with polling...")
-    app.run_polling()
+    print("Bot is running with webhook...")
+
+    # Webhook Setup for Render
+    PORT = int(os.environ.get('PORT', '10000'))
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=TOKEN,
+        webhook_url=f"https://moosdick.onrender.com/{TOKEN}"
+    )
