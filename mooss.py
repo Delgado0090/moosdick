@@ -2,14 +2,12 @@ import os
 import random
 import sqlite3
 from datetime import datetime, timedelta
-from telegram import Update
+from telegram import Update, BotCommand
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, ContextTypes
 )
 
-# ====================
-# DATABASE SETUP
-# ====================
+# Initialize DB
 conn = sqlite3.connect("bigbigger.db", check_same_thread=False)
 cursor = conn.cursor()
 
@@ -33,11 +31,10 @@ CREATE TABLE IF NOT EXISTS loans (
     amount INTEGER
 )
 ''')
+
 conn.commit()
 
-# ====================
-# UTILITY FUNCTIONS
-# ====================
+# Utility Functions
 def get_player(user_id, username):
     cursor.execute("SELECT * FROM players WHERE user_id = ?", (user_id,))
     data = cursor.fetchone()
@@ -63,9 +60,7 @@ def can_use(user_id, field, hours):
         return True
     return datetime.now() - datetime.fromisoformat(last_time) >= timedelta(hours=hours)
 
-# ====================
-# COMMANDS
-# ====================
+# Commands
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     get_player(user.id, user.username)
@@ -85,18 +80,15 @@ async def play(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     new_kir = cursor.execute("SELECT kir FROM players WHERE user_id = ?", (user.id,)).fetchone()[0]
 
-    cursor.execute("UPDATE players SET longest_kir = MAX(longest_kir, ?), shortest_kir = MIN(shortest_kir, ?) WHERE user_id = ?",
-                   (new_kir, new_kir, user.id))
+    cursor.execute("SELECT longest_kir, shortest_kir FROM players WHERE user_id = ?", (user.id,))
+    longest, shortest = cursor.fetchone()
+    if new_kir > longest:
+        cursor.execute("UPDATE players SET longest_kir = ? WHERE user_id = ?", (new_kir, user.id))
+    if shortest == 0 or new_kir < shortest:
+        cursor.execute("UPDATE players SET shortest_kir = ? WHERE user_id = ?", (new_kir, user.id))
     conn.commit()
 
     await update.message.reply_text(f"{user.username}, your Kir changed by {change}. Now: {new_kir}")
-
-async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    leaderboard = cursor.execute("SELECT username, kir FROM players ORDER BY kir DESC LIMIT 10").fetchall()
-    message = "\U0001F3C6 Top Players:\n"
-    for i, (name, kir) in enumerate(leaderboard, 1):
-        message += f"{i}. {name} - {kir} Kir\n"
-    await update.message.reply_text(message)
 
 async def fight(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -136,7 +128,6 @@ async def fight(update: Update, context: ContextTypes.DEFAULT_TYPE):
         loser_id = user.id
 
     fight_points = random.randint(1, min(attacker_kir, defender_kir, 10))
-
     update_kir(winner_id, fight_points)
     update_kir(loser_id, -fight_points)
 
@@ -149,8 +140,12 @@ async def fight(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     for pid in [attacker[0], defender[0]]:
         current_kir = cursor.execute("SELECT kir FROM players WHERE user_id = ?", (pid,)).fetchone()[0]
-        cursor.execute("UPDATE players SET longest_kir = MAX(longest_kir, ?), shortest_kir = MIN(shortest_kir, ?) WHERE user_id = ?",
-                       (current_kir, current_kir, pid))
+        cursor.execute("SELECT longest_kir, shortest_kir FROM players WHERE user_id = ?", (pid,))
+        longest, shortest = cursor.fetchone()
+        if current_kir > longest:
+            cursor.execute("UPDATE players SET longest_kir = ? WHERE user_id = ?", (current_kir, pid))
+        if shortest == 0 or current_kir < shortest:
+            cursor.execute("UPDATE players SET shortest_kir = ? WHERE user_id = ?", (current_kir, pid))
     conn.commit()
 
     winner_kir = cursor.execute("SELECT kir FROM players WHERE user_id = ?", (winner_id,)).fetchone()[0]
@@ -160,110 +155,4 @@ async def fight(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"\u2694\ufe0f Fight Result:\nWinner: {winner_id} (+{fight_points})\nLoser: {loser_id} (-{fight_points})\n"
         f"{winner_id} Rank: {rank_map[winner_id]}, Kir: {winner_kir}"
-    )
-
-async def randomboost(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if not can_use(user.id, "last_random", 24):
-        await update.message.reply_text("You must wait 24 hours before using this command again.")
-        return
-
-    all_players = cursor.execute("SELECT user_id FROM players").fetchall()
-    if not all_players:
-        await update.message.reply_text("No players found.")
-        return
-
-    chosen_id = random.choice(all_players)[0]
-    boost = random.randint(15, 30)
-    update_kir(chosen_id, boost)
-    set_time(user.id, "last_random")
-
-    chosen_name = cursor.execute("SELECT username FROM players WHERE user_id = ?", (chosen_id,)).fetchone()[0]
-    await update.message.reply_text(f"\U0001F389 {chosen_name} has been randomly boosted by {boost} Kir!")
-
-async def loan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    get_player(user.id, user.username)
-
-    if len(context.args) < 2:
-        await update.message.reply_text("Usage: /loan <target_user_id> <amount>")
-        return
-
-    try:
-        target_id = int(context.args[0])
-        amount = int(context.args[1])
-    except:
-        await update.message.reply_text("Invalid input.")
-        return
-
-    if user.id == target_id:
-        await update.message.reply_text("You can't loan to yourself.")
-        return
-
-    target = get_player(target_id, "Unknown")
-    update_kir(user.id, -amount)
-    update_kir(target_id, amount)
-
-    cursor.execute("INSERT INTO loans (lender_id, borrower_id, amount) VALUES (?, ?, ?)",
-                   (user.id, target_id, amount))
-    conn.commit()
-
-    await update.message.reply_text(f"{user.username} loaned {amount} Kir to user {target_id}.")
-
-async def state(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    player = get_player(user.id, user.username)
-    kir = player[2]
-    win_streak = player[5]
-    longest_kir = player[6]
-    shortest_kir = player[7]
-
-    if longest_kir == 0 or kir > longest_kir:
-        cursor.execute("UPDATE players SET longest_kir = ? WHERE user_id = ?", (kir, user.id))
-        longest_kir = kir
-    if shortest_kir == 0 or kir < shortest_kir:
-        cursor.execute("UPDATE players SET shortest_kir = ? WHERE user_id = ?", (kir, user.id))
-        shortest_kir = kir
-    conn.commit()
-
-    all_ranks = cursor.execute("SELECT user_id FROM players ORDER BY kir DESC").fetchall()
-    rank_map = {uid: i+1 for i, (uid,) in enumerate(all_ranks)}
-    rank = rank_map[user.id]
-
-    await update.message.reply_text(
-        f"\U0001F4CA {user.username}'s State:\n"
-        f"Kir: {kir}\n"
-        f"Rank: #{rank}\n"
-        f"Win Streak: {win_streak}\n"
-        f"Longest Kir: {longest_kir}\n"
-        f"Shortest Kir: {shortest_kir}"
-    )
-
-# ====================
-# MAIN — USING WEBHOOKS
-# ====================
-if __name__ == "__main__":
-    from telegram.ext import ApplicationBuilder
-
-    TOKEN = os.environ["BOT_TOKEN"]
-    app = ApplicationBuilder().token(TOKEN).build()
-
-    # Command Handlers
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("play", play))
-    app.add_handler(CommandHandler("top", top))
-    app.add_handler(CommandHandler("fight", fight))
-    app.add_handler(CommandHandler("randomboost", randomboost))
-    app.add_handler(CommandHandler("loan", loan))
-    app.add_handler(CommandHandler("state", state))
-
-    print("Bot is running with webhook...")
-
-    # Webhook Setup for Render
-    PORT = int(os.environ.get('PORT', '10000'))
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        url_path=TOKEN,
-        webhook_url=f"https://moosdick.onrender.com/{TOKEN}"
     )
